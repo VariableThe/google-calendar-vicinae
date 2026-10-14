@@ -3,8 +3,44 @@ import assert from "node:assert/strict";
 import {
   formatBrowserAuthError,
   formatRefreshTokenError,
+  isUnauthenticatedError,
   shouldAutoAttemptRefreshToken,
 } from "../src/lib/auth-errors.js";
+import { NotAuthenticatedError } from "../src/auth/google-oauth.js";
+import { GoogleApiError } from "../src/api/calendar.js";
+
+describe("isUnauthenticatedError", () => {
+  it("treats a rejected refresh (NotAuthenticatedError) as unauthenticated", () => {
+    assert.equal(isUnauthenticatedError(new NotAuthenticatedError()), true);
+    assert.equal(
+      isUnauthenticatedError(new NotAuthenticatedError("Google session expired.")),
+      true,
+    );
+  });
+
+  it("treats GoogleApiError 401 as unauthenticated", () => {
+    assert.equal(
+      isUnauthenticatedError(new GoogleApiError({ status: 401, message: "Unauthorized" })),
+      true,
+    );
+  });
+
+  it("rejects non-401 API errors and unrelated values", () => {
+    assert.equal(
+      isUnauthenticatedError(new GoogleApiError({ status: 403, message: "Forbidden" })),
+      false,
+    );
+    assert.equal(
+      isUnauthenticatedError(new GoogleApiError({ status: 404, message: "Not found" })),
+      false,
+    );
+    assert.equal(isUnauthenticatedError(new Error("network down")), false);
+    assert.equal(isUnauthenticatedError({ status: 401 }), false);
+    assert.equal(isUnauthenticatedError(null), false);
+    assert.equal(isUnauthenticatedError(undefined), false);
+    assert.equal(isUnauthenticatedError("401"), false);
+  });
+});
 
 describe("shouldAutoAttemptRefreshToken", () => {
   it("attempts once when a preference token is present", () => {

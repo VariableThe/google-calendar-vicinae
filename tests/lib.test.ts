@@ -92,8 +92,7 @@ describe("date-utils", () => {
     assert.equal(formatEventTimeRange(undefined, undefined), "");
   });
 
-  it("formatEventDayGroup classifies today/tomorrow/future/past", () => {
-    const now = new Date("2026-10-14T12:00:00.000Z");
+  it("formatEventDayGroup classifies today/tomorrow/future/past", () => {    const now = new Date("2026-10-14T12:00:00.000Z");
     assert.equal(
       formatEventDayGroup({ dateTime: "2026-10-14T18:00:00.000Z" }, now),
       "Today",
@@ -111,6 +110,29 @@ describe("date-utils", () => {
       "Past",
     );
     assert.equal(formatEventDayGroup({ date: "2026-10-14" }, now), "Today");
+  });
+
+  it("date-only values resolve to local midnight, not UTC midnight", () => {
+    // Timezone-agnostic: a date-only start is the same instant as
+    // constructing local midnight directly. (`new Date("2026-10-14")` is
+    // UTC midnight, which is the previous local day west of UTC.)
+    const localMidnight = new Date(2026, 9, 14);
+    assert.equal(
+      compareEventsByStart(
+        { id: "timed", start: { dateTime: toLocalISOString(localMidnight) } },
+        { id: "allday", start: { date: "2026-10-14" } },
+      ),
+      0,
+    );
+  });
+
+  it("date-only events group by local calendar day", () => {
+    // All-local construction, so this holds in every timezone.
+    const now = new Date(2026, 9, 14, 12, 0, 0);
+    assert.equal(formatEventDayGroup({ date: "2026-10-14" }, now), "Today");
+    assert.equal(formatEventDayGroup({ date: "2026-10-15" }, now), "Tomorrow");
+    assert.equal(formatEventDayGroup({ date: "2026-10-20" }, now), "Upcoming");
+    assert.equal(formatEventDayGroup({ date: "2026-10-13" }, now), "Past");
   });
 
   it("toLocalISOString has offset-preserving shape", () => {
