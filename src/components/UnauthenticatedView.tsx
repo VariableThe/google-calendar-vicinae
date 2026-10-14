@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Action,
   ActionPanel,
@@ -14,6 +14,10 @@ import {
   startBrowserAuthorization,
 } from "../auth/google-oauth";
 import { getExtensionPreferences } from "../preferences";
+import {
+  formatRefreshTokenError,
+  shouldAutoAttemptRefreshToken,
+} from "../lib/auth-errors";
 
 const SETUP_MARKDOWN = `# Sign in with Google
 
@@ -43,6 +47,8 @@ function readPreferenceRefreshToken(): string | undefined {
 export function UnauthenticatedView({ onAuthenticated }: { onAuthenticated: () => void }) {
   const [signingIn, setSigningIn] = useState(false);
   const [usingToken, setUsingToken] = useState(false);
+  const [tokenError, setTokenError] = useState<string | undefined>();
+  const autoAttemptedRef = useRef(false);
   const preferenceRefreshToken = readPreferenceRefreshToken();
   const hasPreferenceToken =
     typeof preferenceRefreshToken === "string" && preferenceRefreshToken.length > 0;
@@ -101,9 +107,11 @@ export function UnauthenticatedView({ onAuthenticated }: { onAuthenticated: () =
       toast.style = Toast.Style.Success;
       toast.title = "Signed in with Google";
       await toast.update();
+      setTokenError(undefined);
       onAuthenticated();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const friendly = formatRefreshTokenError(error);
+      setTokenError(friendly);
       toast.style = Toast.Style.Failure;
       toast.title =
         error instanceof MissingClientIdError
@@ -112,12 +120,27 @@ export function UnauthenticatedView({ onAuthenticated }: { onAuthenticated: () =
       toast.message =
         error instanceof MissingClientIdError
           ? "Set your Google OAuth Client ID in the extension preferences, then try again."
-          : message;
+          : friendly;
       await toast.update();
     } finally {
       setUsingToken(false);
     }
   }
+
+  // Boot-time auto-attempt: when the entrypoint landed here, ensureSession()
+  // already tried the preference token and failed silently (it returns false
+  // rather than throwing). Surface the reason by running the same handler
+  // once — same code path as the manual retry action, guarded by a ref so
+  // re-renders never re-attempt and the exchange can never loop. On success
+  // the handler calls onAuthenticated(), handing control back to the command.
+  useEffect(() => {
+    if (autoAttemptedRef.current) return;
+    autoAttemptedRef.current = true;
+    if (shouldAutoAttemptRefreshToken(readPreferenceRefreshToken(), false)) {
+      void handleUsePreferenceToken();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleOpenPreferences() {
     try {
@@ -131,9 +154,13 @@ export function UnauthenticatedView({ onAuthenticated }: { onAuthenticated: () =
     }
   }
 
+  const markdown = tokenError
+    ? `${SETUP_MARKDOWN}\n\n---\n\n⚠️ **Refresh token sign-in failed**\n\n${tokenError}\n\nFix the preferences, then choose **Use Refresh Token from Preferences** to retry.`
+    : SETUP_MARKDOWN;
+
   return (
     <Detail
-      markdown={SETUP_MARKDOWN}
+      markdown={markdown}
       actions={
         <ActionPanel>
           <Action

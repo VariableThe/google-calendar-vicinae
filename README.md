@@ -11,7 +11,7 @@ launcher.
 
 Status: four commands implemented (`list-events`, `list-calendars`,
 `create-event`, `create-quick-event`), typechecked (`npm run typecheck`),
-unit-tested (50+ tests via `npm test`), built cleanly (`npm run build`).
+unit-tested (`npm test`), built cleanly (`npm run build`).
 
 ## Features
 
@@ -91,8 +91,9 @@ Two paths, both using your own Desktop-app client:
   `node scripts/get-refresh-token.mjs --help`) and paste it into the
   `refreshToken` preference. On the next launch the extension exchanges it
   for a session with no browser interaction; the unauthenticated view also
-  offers "Use Refresh Token from Preferences" to retry the exchange, with
-  failures shown in a toast.
+  offers "Use Refresh Token from Preferences" to retry the exchange, and
+  auto-attempts the exchange once on load when a refresh token is
+  configured, with failures shown inline in the view (and in a toast).
 
   Warning: tokens minted for a different client ID — e.g. via the OAuth
   Playground or `gcloud` — do not match your configured Client ID and the

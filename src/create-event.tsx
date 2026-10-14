@@ -67,6 +67,7 @@ function roundUpToNextHalfHour(from: Date): Date {
 
 export default function CreateEventCommand() {
   const [status, setStatus] = useState<Status>("checking");
+  const [reload, setReload] = useState(0);
   const [calendars, setCalendars] = useState<CalendarListEntry[]>([]);
   const [calendarsLoading, setCalendarsLoading] = useState(true);
 
@@ -127,14 +128,23 @@ export default function CreateEventCommand() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reload]);
 
   if (status === "checking") {
     return <Form isLoading navigationTitle="Create Event" />;
   }
 
   if (status === "unauthed") {
-    return <UnauthenticatedView onAuthenticated={() => setStatus("checking")} />;
+    // Flip to "checking" AND bump reload: the boot effect depends on reload,
+    // so a bare setStatus would leave a stale loading view that never boots.
+    return (
+      <UnauthenticatedView
+        onAuthenticated={() => {
+          setStatus("checking");
+          setReload((n) => n + 1);
+        }}
+      />
+    );
   }
 
   async function handleSubmit() {

@@ -37,6 +37,7 @@ function formatPreviewDate(date: Date): string {
 export default function CreateQuickEventCommand() {
   const { push } = useNavigation();
   const [status, setStatus] = useState<Status>("checking");
+  const [reload, setReload] = useState(0);
   const [calendars, setCalendars] = useState<CalendarListEntry[]>([]);
   const [calendarsLoading, setCalendarsLoading] = useState(true);
   const [text, setText] = useState("");
@@ -79,7 +80,7 @@ export default function CreateQuickEventCommand() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reload]);
 
   const preview = useMemo(() => parseQuickEventText(text), [text]);
 
@@ -88,7 +89,16 @@ export default function CreateQuickEventCommand() {
   }
 
   if (status === "unauthed") {
-    return <UnauthenticatedView onAuthenticated={() => setStatus("checking")} />;
+    // Flip to "checking" AND bump reload: the boot effect depends on reload,
+    // so a bare setStatus would leave a stale loading view that never boots.
+    return (
+      <UnauthenticatedView
+        onAuthenticated={() => {
+          setStatus("checking");
+          setReload((n) => n + 1);
+        }}
+      />
+    );
   }
 
   function previewText(): string {
