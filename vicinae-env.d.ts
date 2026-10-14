@@ -20,6 +20,12 @@ type ExtensionPreferences = {
 
 	/** Default Event Duration - Default duration for new events. */
 	"defaultEventDuration"?: "15" | "30" | "45" | "60" | "90" | "120";
+
+	/** Send Invitations - Who receives invitation emails when an event is created. */
+	"sendInvitations"?: "all" | "externalOnly" | "none";
+
+	/** Add Signature - Append a one-line Created with Vicinae signature to the description of new events. */
+	"addSignature"?: boolean;
 }
 
 declare type Preferences = ExtensionPreferences

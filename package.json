@@ -125,6 +125,28 @@
         { "title": "90 minutes", "value": "90" },
         { "title": "120 minutes", "value": "120" }
       ]
+    },
+    {
+      "name": "sendInvitations",
+      "title": "Send Invitations",
+      "description": "Who receives invitation emails when an event is created.",
+      "type": "dropdown",
+      "required": false,
+      "default": "all",
+      "data": [
+        { "title": "All Guests", "value": "all" },
+        { "title": "External Guests Only", "value": "externalOnly" },
+        { "title": "None", "value": "none" }
+      ]
+    },
+    {
+      "name": "addSignature",
+      "title": "Add Signature",
+      "label": "Append a Created with Vicinae signature to new events",
+      "description": "Append a one-line Created with Vicinae signature to the description of new events.",
+      "type": "checkbox",
+      "required": false,
+      "default": true
     }
   ],
   "dependencies": {
