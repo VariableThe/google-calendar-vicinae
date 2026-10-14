@@ -104,6 +104,33 @@ Note: Vicinae's built-in `OAuth.PKCEClient` is intentionally not used —
 its redirect URIs (raycast.com / `raycast://` / `com.raycast:/`) are not
 usable with Google's Desktop-app client type.
 
+## Troubleshooting
+
+- **`access_denied` in the browser.** Google denied the consent grant.
+  The three usual causes: your account is not listed as a test user — add
+  it under Google Auth Platform → Audience → Test users (older console UI:
+  APIs & Services → OAuth consent screen); the consent screen user type is
+  "Internal" and your account is outside that Workspace organization;
+  or a Workspace admin policy blocks the unverified app.
+- **`Google API error 403 … Calendar API has not been used in project …
+  or it is disabled`.** The Google Calendar API is not enabled for your
+  project. Enable it at the URL in the error message (APIs & Services >
+  Library > Google Calendar API), wait ~1–2 minutes for the change to
+  propagate, then retry — no re-sign-in is needed.
+- **`insufficient authentication scopes`.** The stored token was issued
+  for a different OAuth client or scope set. Sign out (clears stored
+  tokens) and sign in again.
+- **`invalid_grant` from a pasted refresh token.** The token was minted
+  for a different Client ID. Mint it for the same Client ID stored in the
+  extension preferences with `node scripts/get-refresh-token.mjs --help`
+  — not via the OAuth Playground or `gcloud`. Testing-mode tokens also
+  expire after ~7 days; re-sign-in is then required.
+- **Nothing shows up in Vicinae's OAuth store.** Expected: tokens are
+  kept in the extension's own Vicinae `LocalStorage` entry, not in
+  Vicinae's OAuth credential store (`OAuth.PKCEClient` is intentionally
+  not used — its redirect URIs don't work with Google Desktop-app
+  clients).
+
 ## Preferences
 
 - `googleClientId`, `googleClientSecret`, `refreshToken`,

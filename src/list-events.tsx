@@ -26,6 +26,7 @@ import { getMeetingUrl } from "./lib/meet-links";
 import { compareEventsByStart, dedupeEvents } from "./lib/event-dedupe";
 import type { EventListItemData } from "./lib/event-dedupe";
 import { EventDetailView, EventListItem } from "./components/EventListItem";
+import { formatGoogleApiError } from "./lib/api-errors";
 import { UnauthenticatedView } from "./components/UnauthenticatedView";
 import ListCalendarsCommand from "./list-calendars";
 import CreateEventCommand from "./create-event";
@@ -105,7 +106,7 @@ export default function ListEventsCommand() {
           await showToast({
             style: Toast.Style.Failure,
             title: `Could not load “${cal.summary ?? cal.id}”`,
-            message: error instanceof Error ? error.message : String(error),
+            message: formatGoogleApiError(error),
           });
           return { cal, events: [] as GoogleEvent[] };
         }
@@ -173,7 +174,7 @@ export default function ListEventsCommand() {
         authedRef.current = false;
         setStatus("unauthed");
       } else {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = formatGoogleApiError(error);
         setLoadError(message);
         await showToast({
           style: Toast.Style.Failure,
@@ -221,7 +222,7 @@ export default function ListEventsCommand() {
             await showToast({
               style: Toast.Style.Failure,
               title: "Search failed",
-              message: error instanceof Error ? error.message : String(error),
+              message: formatGoogleApiError(error),
             });
           }
         } finally {

@@ -15,6 +15,7 @@ import {
 } from "../auth/google-oauth";
 import { getExtensionPreferences } from "../preferences";
 import {
+  formatBrowserAuthError,
   formatRefreshTokenError,
   shouldAutoAttemptRefreshToken,
 } from "../lib/auth-errors";
@@ -75,7 +76,7 @@ export function UnauthenticatedView({ onAuthenticated }: { onAuthenticated: () =
           "Set your Google OAuth Client ID in the extension preferences, then try again.";
         await toast.update();
       } else {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = formatBrowserAuthError(error);
         toast.style = Toast.Style.Failure;
         toast.title = "Google sign-in failed";
         toast.message = message;
