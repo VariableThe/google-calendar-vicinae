@@ -11,7 +11,7 @@ import {
   Toast,
 } from "@vicinae/api";
 import { GoogleApiError, type CalendarListEntry } from "./api/calendar";
-import { isAuthenticated, signOut } from "./auth/google-oauth";
+import { ensureSession, signOut } from "./auth/google-oauth";
 import { getCalendarClient } from "./lib/get-client";
 import {
   fetchCalendarsWithCache,
@@ -44,7 +44,7 @@ export default function ListCalendarsCommand() {
     async function boot() {
       setIsLoading(true);
       try {
-        if (!(await isAuthenticated())) {
+        if (!(await ensureSession())) {
           if (!cancelled) {
             setStatus("unauthed");
             setCalendars([]);

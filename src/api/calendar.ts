@@ -14,6 +14,8 @@
  * `events.instances`; recurring instances are expanded server-side.
  */
 
+import { invalidateAccessToken as invalidateStoredAccessToken } from "../auth/google-oauth";
+
 export interface GoogleApiErrorOptions {
   status: number;
   message: string;
@@ -90,6 +92,7 @@ export interface GoogleEvent {
   creator?: EventPerson;
   colorId?: string;
   recurringEventId?: string;
+  recurrence?: string[];
   iCalUID?: string;
   reminders?: {
     useDefault?: boolean;
@@ -157,6 +160,11 @@ export interface GoogleCalendarClient {
     params: ListEventsParams,
     signal?: AbortSignal,
   ): Promise<ListEventsResult>;
+  listAllEvents(
+    calendarId: string,
+    params: ListEventsParams,
+    options?: { maxPages?: number; signal?: AbortSignal },
+  ): Promise<GoogleEvent[]>;
   quickAddEvent(
     calendarId: string,
     text: string,
@@ -176,6 +184,11 @@ export interface GoogleCalendarClient {
 
 export interface CalendarClientConfig {
   getAccessToken: () => Promise<string>;
+  /**
+   * Forced-expiry hook called once before a single 401 retry. Defaults to
+   * the real auth module's invalidateAccessToken; inject a stub in tests.
+   */
+  invalidateAccessToken?: () => Promise<void>;
   fetchImpl?: FetchLike;
   baseUrl?: string;
 }
@@ -224,30 +237,18 @@ export function createCalendarClient(config: CalendarClientConfig): GoogleCalend
           throw new Error("No fetch implementation available");
         }) as FetchLike);
 
-  async function authorizedFetch(
-    url: string,
-    init: { method?: string; headers?: Record<string, string>; body?: string },
-    signal?: AbortSignal,
-  ): Promise<any> {
-    const token = await config.getAccessToken();
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
-      ...(init.headers ?? {}),
-    };
-    // `FetchLike` does not declare `signal`, but the underlying fetch
-    // supports it — forward through with a cast.
-    const requestInit = { ...init, headers, ...(signal ? { signal } : {}) } as {
-      method?: string;
-      headers?: Record<string, string>;
-      body?: string;
-    };
-    const response = await fetchImpl(url, requestInit);
+  const invalidateForRetry: () => Promise<void> =
+    config.invalidateAccessToken ??
+    (async () => {
+      try {
+        await invalidateStoredAccessToken();
+      } catch {
+        // Host token store unreachable (e.g. unit tests with a stubbed
+        // getAccessToken) — the retry below still re-reads the token.
+      }
+    });
 
-    if (response.ok) {
-      if (response.status === 204) return undefined;
-      return await response.json();
-    }
-
+  async function throwGoogleApiError(response: HttpResponseLike): Promise<never> {
     // Non-2xx: parse Google's error envelope when possible.
     let parsedBody: unknown;
     let rawText = "";
@@ -277,7 +278,42 @@ export function createCalendarClient(config: CalendarClientConfig): GoogleCalend
     });
   }
 
-  return {
+  async function authorizedFetch(
+    url: string,
+    init: { method?: string; headers?: Record<string, string>; body?: string },
+    signal?: AbortSignal,
+    retried = false,
+  ): Promise<any> {
+    const token = await config.getAccessToken();
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      ...(init.headers ?? {}),
+    };
+    // `FetchLike` does not declare `signal`, but the underlying fetch
+    // supports it — forward through with a cast.
+    const requestInit = { ...init, headers, ...(signal ? { signal } : {}) } as {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+    };
+    const response = await fetchImpl(url, requestInit);
+
+    if (response.ok) {
+      if (response.status === 204) return undefined;
+      return await response.json();
+    }
+
+    if (response.status === 401 && !retried) {
+      // Access token rejected: force a refresh through getAccessToken() and
+      // retry exactly once. `retried` guarantees this cannot loop.
+      await invalidateForRetry();
+      return authorizedFetch(url, init, signal, true);
+    }
+
+    return throwGoogleApiError(response);
+  }
+
+  const client: GoogleCalendarClient = {
     async listCalendars(options?: { showHidden?: boolean }): Promise<CalendarListEntry[]> {
       const showHidden = options?.showHidden ?? false;
       const items: CalendarListEntry[] = [];
@@ -319,6 +355,28 @@ export function createCalendarClient(config: CalendarClientConfig): GoogleCalend
         nextPageToken:
           typeof data?.nextPageToken === "string" ? data.nextPageToken : undefined,
       };
+    },
+
+    async listAllEvents(
+      calendarId: string,
+      params: ListEventsParams,
+      options?: { maxPages?: number; signal?: AbortSignal },
+    ): Promise<GoogleEvent[]> {
+      const maxPages = options?.maxPages ?? 10;
+      const all: GoogleEvent[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; page < maxPages; page++) {
+        const result = await client.listEvents(
+          calendarId,
+          { ...params, pageToken },
+          options?.signal,
+        );
+        all.push(...result.items);
+        // A page without a token is the last one — stop early.
+        if (!result.nextPageToken) break;
+        pageToken = result.nextPageToken;
+      }
+      return all;
     },
 
     async quickAddEvent(
@@ -376,4 +434,6 @@ export function createCalendarClient(config: CalendarClientConfig): GoogleCalend
       return (await authorizedFetch(url, { method: "GET" }, signal)) as GoogleEvent;
     },
   };
+
+  return client;
 }

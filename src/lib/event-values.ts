@@ -21,9 +21,7 @@ export const GOOGLE_EVENT_COLORS: Record<string, { name: string; hex: string }> 
  */
 export function resolveEventColorId(
   event: Pick<GoogleEvent, "colorId"> | undefined,
-  calendarBackgroundColor?: string,
 ): string | undefined {
-  void calendarBackgroundColor;
   const colorId = event?.colorId;
   if (typeof colorId === "string" && GOOGLE_EVENT_COLORS[colorId] !== undefined) {
     return colorId;
@@ -31,22 +29,54 @@ export function resolveEventColorId(
   return undefined;
 }
 
+/** Resolve the display hex for an event: its own colorId wins, else the calendar color. */
+export function resolveEventColorHex(
+  event: Pick<GoogleEvent, "colorId"> | undefined,
+  calendarBackgroundColor?: string,
+): string | undefined {
+  const colorId = resolveEventColorId(event);
+  if (colorId) return GOOGLE_EVENT_COLORS[colorId].hex;
+  return calendarBackgroundColor;
+}
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Split on commas/semicolons/whitespace/newlines, validate, lowercase, dedupe. */
 export function parseAttendeeEmails(input: string): string[] {
-  if (!input || typeof input !== "string") return [];
-  const seen = new Set<string>();
-  const result: string[] = [];
+  return splitAttendeeEmails(input).valid;
+}
+
+export interface SplitAttendeeEmails {
+  valid: string[];
+  invalid: string[];
+}
+
+/**
+ * Like `parseAttendeeEmails` but also reports the offending tokens so the
+ * UI can warn about typo'd guests instead of silently dropping them.
+ * Invalid tokens are lowercased, de-duplicated, order-preserving.
+ */
+export function splitAttendeeEmails(input: string): SplitAttendeeEmails {
+  if (!input || typeof input !== "string") return { valid: [], invalid: [] };
+  const seenValid = new Set<string>();
+  const seenInvalid = new Set<string>();
+  const valid: string[] = [];
+  const invalid: string[] = [];
   for (const part of input.split(/[,\s;]+/)) {
     const trimmed = part.trim().toLowerCase();
     if (trimmed.length === 0) continue;
-    if (!EMAIL_RE.test(trimmed)) continue;
-    if (seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    result.push(trimmed);
+    if (!EMAIL_RE.test(trimmed)) {
+      if (!seenInvalid.has(trimmed)) {
+        seenInvalid.add(trimmed);
+        invalid.push(trimmed);
+      }
+      continue;
+    }
+    if (seenValid.has(trimmed)) continue;
+    seenValid.add(trimmed);
+    valid.push(trimmed);
   }
-  return result;
+  return { valid, invalid };
 }
 
 const DAY_LABELS: Record<string, string> = {

@@ -107,14 +107,18 @@ interface CalendarListingClient {
   listCalendars(): Promise<CalendarListEntry[]>;
 }
 
+let sharedCache: import("@vicinae/api").Cache | undefined;
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 function loadCache(): import("@vicinae/api").Cache | undefined {
+  if (sharedCache !== undefined) return sharedCache;
   try {
     const api = require("@vicinae/api") as typeof import("@vicinae/api");
-    return new api.Cache();
+    sharedCache = new api.Cache();
   } catch {
-    return undefined;
+    sharedCache = undefined;
   }
+  return sharedCache;
 }
 
 /**

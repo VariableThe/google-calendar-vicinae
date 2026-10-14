@@ -2,49 +2,20 @@ import { Color, Detail, Icon, List } from "@vicinae/api";
 import type { CalendarListEntry, GoogleEvent } from "../api/calendar";
 import { formatEventTimeRange } from "../lib/date-utils";
 import {
+  GOOGLE_EVENT_COLORS,
   formatRecurrenceRule,
   getAttendeeSummary,
   getResponseStatusLabel,
+  resolveEventColorHex,
 } from "../lib/event-values";
 import { getMeetingProviderName, getMeetingUrl } from "../lib/meet-links";
+import {
+  compareEventsByStart,
+  dedupeEvents,
+  type EventListItemData,
+} from "../lib/event-dedupe";
 
-export interface EventListItemData {
-  event: GoogleEvent;
-  calendarId: string;
-  calendarName?: string;
-  calendarColor?: string;
-}
-
-function eventStartMs(event: GoogleEvent): number {
-  const raw = event.start?.dateTime ?? event.start?.date;
-  const ms = raw ? new Date(raw).getTime() : NaN;
-  return Number.isNaN(ms) ? 0 : ms;
-}
-
-export function compareEventsByStart(a: GoogleEvent, b: GoogleEvent): number {
-  return eventStartMs(a) - eventStartMs(b);
-}
-
-/**
- * De-duplicate events appearing on several calendars (same `iCalUID`).
- * Events from the primary calendar win; otherwise the first occurrence.
- */
-export function dedupeEvents(
-  events: EventListItemData[],
-  primaryCalendarId?: string,
-): EventListItemData[] {
-  const byKey = new Map<string, EventListItemData>();
-  for (const item of events) {
-    const key = item.event.iCalUID ?? `${item.calendarId}:${item.event.id}`;
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, item);
-    } else if (primaryCalendarId && item.calendarId === primaryCalendarId) {
-      byKey.set(key, item);
-    }
-  }
-  return [...byKey.values()];
-}
+export { compareEventsByStart, dedupeEvents, type EventListItemData };
 
 export function eventSubtitle(
   event: GoogleEvent,
@@ -61,11 +32,12 @@ export function eventAccessories(
   item: EventListItemData,
 ): List.Item.Accessory[] {
   const accessories: List.Item.Accessory[] = [];
-  if (item.calendarColor || item.calendarName) {
+  const displayColor = resolveEventColorHex(item.event, item.calendarColor);
+  if (item.calendarColor || item.calendarName || displayColor) {
     accessories.push({
       tag: {
         value: item.calendarName ?? item.calendarId,
-        ...(item.calendarColor ? { color: item.calendarColor } : {}),
+        ...(displayColor ? { color: displayColor } : {}),
       },
       tooltip: item.calendarName ?? item.calendarId,
     });
@@ -84,6 +56,10 @@ export function eventAccessories(
     });
   }
   return accessories;
+}
+
+export function eventTitleColor(item: EventListItemData): string | undefined {
+  return resolveEventColorHex(item.event, item.calendarColor);
 }
 
 export function EventListItem({
@@ -141,15 +117,17 @@ export function EventDetailView({
 }) {
   const { event } = item;
   const meetingUrl = getMeetingUrl(event);
-  // `recurrence` (RRULE lines) is not part of the list-view type but the API
-  // returns it; read it defensively.
-  const recurrenceLines = (event as { recurrence?: unknown }).recurrence;
+  const recurrenceLines = event.recurrence;
   const recurrence = Array.isArray(recurrenceLines)
     ? recurrenceLines
         .filter((r): r is string => typeof r === "string")
         .map((r) => formatRecurrenceRule(r))
         .find(Boolean)
     : undefined;
+  const colorId =
+    typeof event.colorId === "string" && GOOGLE_EVENT_COLORS[event.colorId]
+      ? event.colorId
+      : undefined;
   return (
     <Detail
       markdown={eventDetailMarkdown(item)}
@@ -157,6 +135,13 @@ export function EventDetailView({
         <Detail.Metadata>
           {item.calendarName ? (
             <Detail.Metadata.Label title="Calendar" text={item.calendarName} icon={Icon.Calendar} />
+          ) : null}
+          {colorId ? (
+            <Detail.Metadata.Label
+              title="Colour"
+              text={GOOGLE_EVENT_COLORS[colorId].name}
+              icon={Icon.Circle}
+            />
           ) : null}
           {event.organizer?.email ? (
             <Detail.Metadata.Label

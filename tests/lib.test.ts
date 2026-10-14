@@ -15,8 +15,14 @@ import {
   getAttendeeSummary,
   getResponseStatusLabel,
   parseAttendeeEmails,
+  resolveEventColorHex,
   resolveEventColorId,
+  splitAttendeeEmails,
 } from "../src/lib/event-values.js";
+import {
+  compareEventsByStart,
+  dedupeEvents,
+} from "../src/lib/event-dedupe.js";
 import {
   getMeetingProviderName,
   getMeetingUrl,
@@ -130,10 +136,17 @@ describe("event-values", () => {
   });
 
   it("resolveEventColorId passes valid ids through, rejects others", () => {
-    assert.equal(resolveEventColorId({ colorId: "4" }, "#7986cb"), "4");
-    assert.equal(resolveEventColorId({ colorId: "99" }, "#7986cb"), undefined);
-    assert.equal(resolveEventColorId({}, "#7986cb"), undefined);
-    assert.equal(resolveEventColorId(undefined, "#7986cb"), undefined);
+    assert.equal(resolveEventColorId({ colorId: "4" }), "4");
+    assert.equal(resolveEventColorId({ colorId: "99" }), undefined);
+    assert.equal(resolveEventColorId({}), undefined);
+    assert.equal(resolveEventColorId(undefined), undefined);
+  });
+
+  it("resolveEventColorHex prefers the event color, falls back to calendar", () => {
+    assert.equal(resolveEventColorHex({ colorId: "4" }, "#123456"), "#e67c73");
+    assert.equal(resolveEventColorHex({ colorId: "99" }, "#123456"), "#123456");
+    assert.equal(resolveEventColorHex({}, "#123456"), "#123456");
+    assert.equal(resolveEventColorHex(undefined, undefined), undefined);
   });
 
   it("parseAttendeeEmails handles messy separators, dupes, case, junk", () => {
@@ -143,6 +156,16 @@ describe("event-values", () => {
     );
     assert.deepEqual(parseAttendeeEmails(""), []);
     assert.deepEqual(parseAttendeeEmails("   , ;  "), []);
+  });
+
+  it("splitAttendeeEmails reports invalid tokens while keeping valid ones", () => {
+    const split = splitAttendeeEmails("ada@example.com, not-an-email bob@ bad@x");
+    assert.deepEqual(split.valid, ["ada@example.com"]);
+    assert.deepEqual(split.invalid, ["not-an-email", "bob@", "bad@x"]);
+    assert.deepEqual(splitAttendeeEmails(""), { valid: [], invalid: [] });
+    const dupes = splitAttendeeEmails("junk junk ADA@example.com,ada@example.com");
+    assert.deepEqual(dupes.valid, ["ada@example.com"]);
+    assert.deepEqual(dupes.invalid, ["junk"]);
   });
 
   it("formatRecurrenceRule humanizes common rules", () => {
@@ -216,6 +239,25 @@ describe("meet-links", () => {
     assert.equal(getMeetingUrl(undefined), undefined);
   });
 
+  it("ignores non-video URLs in location/description", () => {
+    assert.equal(
+      getMeetingUrl({ description: "Notes: https://docs.google.com/document/d/abc123/edit" }),
+      undefined,
+    );
+    assert.equal(
+      getMeetingUrl({ location: "HQ, see https://example.com/agenda" }),
+      undefined,
+    );
+    // A docs link followed by a real meeting link resolves to the meeting link.
+    assert.equal(
+      getMeetingUrl({
+        description:
+          "Notes https://docs.google.com/document/d/abc join https://meet.google.com/abc-defg-hij",
+      }),
+      "https://meet.google.com/abc-defg-hij",
+    );
+  });
+
   it("isVideoCallUrl positives and negatives", () => {
     assert.equal(isVideoCallUrl("https://meet.google.com/abc"), true);
     assert.equal(isVideoCallUrl("https://acme.zoom.us/j/123"), true);
@@ -234,5 +276,64 @@ describe("meet-links", () => {
     assert.equal(getMeetingProviderName("https://team.whereby.com/r"), "Whereby");
     assert.equal(getMeetingProviderName("https://meet.jit.si/room"), "Jitsi");
     assert.equal(getMeetingProviderName("https://example.com"), undefined);
+  });
+});
+
+describe("event-dedupe", () => {
+  function item(calendarId: string, overrides: Record<string, unknown> = {}) {
+    return {
+      calendarId,
+      event: {
+        id: `id-${calendarId}`,
+        iCalUID: "uid-1",
+        summary: "Standup",
+        start: { dateTime: "2026-10-15T09:00:00.000Z" },
+        ...overrides,
+      },
+    };
+  }
+
+  it("collapses only the same occurrence (uid + start + summary)", () => {
+    const a = item("work");
+    const b = item("personal");
+    assert.equal(dedupeEvents([a, b], "work", "personal").length, 1);
+
+    const differentStart = item("personal", { start: { dateTime: "2026-10-15T10:00:00.000Z" } });
+    assert.equal(dedupeEvents([a, differentStart], "work", "personal").length, 2);
+
+    const differentSummary = item("personal", { summary: "Different" });
+    assert.equal(dedupeEvents([a, differentSummary], "work", "personal").length, 2);
+  });
+
+  it("prefers the user's default calendar over the primary", () => {
+    const primary = item("primary-cal");
+    const def = item("work-cal");
+    const winner = dedupeEvents([primary, def], "work-cal", "primary-cal");
+    assert.equal(winner.length, 1);
+    assert.equal(winner[0].calendarId, "work-cal");
+    // Order-independent: default still wins when listed second.
+    const winner2 = dedupeEvents([def, primary], "work-cal", "primary-cal");
+    assert.equal(winner2[0].calendarId, "work-cal");
+  });
+
+  it("falls back to primary, then first occurrence", () => {
+    const a = item("a");
+    const b = item("b");
+    assert.equal(dedupeEvents([a, b], undefined, "b")[0].calendarId, "b");
+    assert.equal(dedupeEvents([a, b])[0].calendarId, "a");
+  });
+
+  it("never collapses events without an iCalUID", () => {
+    const a = { calendarId: "a", event: { id: "same", summary: "X" } };
+    const b = { calendarId: "b", event: { id: "same", summary: "X" } };
+    assert.equal(dedupeEvents([a, b], "a", "b").length, 2);
+  });
+
+  it("compareEventsByStart orders by start instant", () => {
+    const early = { id: "e", start: { dateTime: "2026-10-15T09:00:00.000Z" } };
+    const late = { id: "l", start: { dateTime: "2026-10-15T10:00:00.000Z" } };
+    assert.ok(compareEventsByStart(early, late) < 0);
+    assert.ok(compareEventsByStart(late, early) > 0);
+    assert.equal(compareEventsByStart(early, { ...early }), 0);
   });
 });

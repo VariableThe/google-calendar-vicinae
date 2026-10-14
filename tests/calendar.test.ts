@@ -229,4 +229,113 @@ describe("createCalendarClient", () => {
     await client.getEvent("a/b#c", "d/e");
     assert.ok(calls[0].url.includes("/calendars/a%2Fb%23c/events/d%2Fe"));
   });
+
+  it("401 invalidates once and retries with the fresh token", async () => {
+    let tokenCalls = 0;
+    let invalidations = 0;
+    const { calls, fetchImpl } = makeFakeFetch(async (url, init) => {
+      const auth = init?.headers?.["Authorization"];
+      if (auth === "Bearer stale-token") {
+        return errorResponse(401, {
+          error: { message: "Invalid Credentials", errors: [{ reason: "authError" }] },
+        });
+      }
+      return jsonResponse({ id: "e1" });
+    });
+    const client = createCalendarClient({
+      getAccessToken: async () => (++tokenCalls === 1 ? "stale-token" : "fresh-token"),
+      invalidateAccessToken: async () => {
+        invalidations++;
+      },
+      fetchImpl,
+    });
+    const event = await client.getEvent("primary", "e1");
+    assert.equal(event.id, "e1");
+    assert.equal(calls.length, 2);
+    assert.equal(invalidations, 1);
+    assert.equal(tokenCalls, 2);
+    assert.equal(calls[0].init?.headers?.["Authorization"], "Bearer stale-token");
+    assert.equal(calls[1].init?.headers?.["Authorization"], "Bearer fresh-token");
+  });
+
+  it("a second 401 surfaces GoogleApiError with status 401 after exactly two attempts", async () => {
+    let invalidations = 0;
+    const { calls, fetchImpl } = makeFakeFetch(async () =>
+      errorResponse(401, {
+        error: { message: "Invalid Credentials", errors: [{ reason: "authError" }] },
+      }),
+    );
+    const client = createCalendarClient({
+      getAccessToken: async () => "still-bad",
+      invalidateAccessToken: async () => {
+        invalidations++;
+      },
+      fetchImpl,
+    });
+    await assert.rejects(() => client.getEvent("primary", "e1"), (err: unknown) => {
+      assert.ok(err instanceof GoogleApiError);
+      assert.equal((err as GoogleApiError).status, 401);
+      return true;
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(invalidations, 1);
+  });
+});
+
+describe("listAllEvents", () => {
+  const baseParams = {
+    timeMin: "2026-10-14T00:00:00.000Z",
+    timeMax: "2026-10-21T00:00:00.000Z",
+  };
+
+  function pageTokensOf(calls: { url: string }[]): (string | null)[] {
+    return calls.map((c) => new URL(c.url).searchParams.get("pageToken"));
+  }
+
+  it("follows nextPageToken across pages and stops when a page omits the token", async () => {
+    const { calls, fetchImpl } = makeFakeFetch(async (url) => {
+      const pageToken = new URL(url).searchParams.get("pageToken");
+      if (pageToken === null) return jsonResponse({ items: [{ id: "e1" }], nextPageToken: "p2" });
+      if (pageToken === "p2") return jsonResponse({ items: [{ id: "e2" }], nextPageToken: "p3" });
+      assert.equal(pageToken, "p3");
+      return jsonResponse({ items: [{ id: "e3" }] });
+    });
+    const client = createCalendarClient({
+      getAccessToken: async () => "tok",
+      fetchImpl,
+    });
+    const items = await client.listAllEvents("primary", baseParams);
+    assert.deepEqual(items.map((e) => e.id), ["e1", "e2", "e3"]);
+    assert.equal(calls.length, 3);
+    assert.deepEqual(pageTokensOf(calls), [null, "p2", "p3"]);
+  });
+
+  it("respects maxPages", async () => {
+    const { calls, fetchImpl } = makeFakeFetch(async (url) => {
+      const pageToken = new URL(url).searchParams.get("pageToken");
+      if (pageToken === null) return jsonResponse({ items: [{ id: "e1" }], nextPageToken: "p2" });
+      return jsonResponse({ items: [{ id: "e2" }], nextPageToken: "p3" });
+    });
+    const client = createCalendarClient({
+      getAccessToken: async () => "tok",
+      fetchImpl,
+    });
+    const items = await client.listAllEvents("primary", baseParams, { maxPages: 2 });
+    assert.deepEqual(items.map((e) => e.id), ["e1", "e2"]);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(pageTokensOf(calls), [null, "p2"]);
+  });
+
+  it("returns a single page when the first response has no token", async () => {
+    const { calls, fetchImpl } = makeFakeFetch(async () =>
+      jsonResponse({ items: [{ id: "only" }] }),
+    );
+    const client = createCalendarClient({
+      getAccessToken: async () => "tok",
+      fetchImpl,
+    });
+    const items = await client.listAllEvents("primary", baseParams);
+    assert.deepEqual(items.map((e) => e.id), ["only"]);
+    assert.equal(calls.length, 1);
+  });
 });

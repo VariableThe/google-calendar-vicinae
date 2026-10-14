@@ -11,7 +11,7 @@ import {
   Toast,
 } from "@vicinae/api";
 import { GoogleApiError, type CalendarListEntry, type GoogleEvent } from "./api/calendar";
-import { isAuthenticated, signOut } from "./auth/google-oauth";
+import { ensureSession, signOut } from "./auth/google-oauth";
 import { getListEventsPreferences } from "./preferences";
 import { getCalendarClient } from "./lib/get-client";
 import {
@@ -23,13 +23,9 @@ import {
 } from "./lib/calendar-selection";
 import { computeTimeRange, formatEventDayGroup } from "./lib/date-utils";
 import { getMeetingUrl } from "./lib/meet-links";
-import {
-  EventDetailView,
-  EventListItem,
-  compareEventsByStart,
-  dedupeEvents,
-  type EventListItemData,
-} from "./components/EventListItem";
+import { compareEventsByStart, dedupeEvents } from "./lib/event-dedupe";
+import type { EventListItemData } from "./lib/event-dedupe";
+import { EventDetailView, EventListItem } from "./components/EventListItem";
 import { UnauthenticatedView } from "./components/UnauthenticatedView";
 import ListCalendarsCommand from "./list-calendars";
 import CreateEventCommand from "./create-event";
@@ -47,6 +43,14 @@ function describeRange(daysToShow: string): string {
   return `${whole} day${whole === 1 ? "" : "s"}`;
 }
 
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  return (
+    error instanceof DOMException && error.name === "AbortError" ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
 export default function ListEventsCommand() {
   const [status, setStatus] = useState<Status>("checking");
   const [calendars, setCalendars] = useState<CalendarListEntry[]>([]);
@@ -57,6 +61,8 @@ export default function ListEventsCommand() {
   const [loadError, setLoadError] = useState<string | undefined>();
   const calendarsRef = useRef<CalendarListEntry[]>([]);
   const authedRef = useRef(false);
+  const generationRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   const prefs = getListEventsPreferences();
   const daysToShow = prefs.daysToShow;
@@ -68,6 +74,8 @@ export default function ListEventsCommand() {
     query: string,
     defaultId: string,
     primaryId: string | undefined,
+    signal?: AbortSignal,
+    expectedGeneration?: number,
   ): Promise<void> {
     const client = getCalendarClient();
     const { timeMin, timeMax } = computeTimeRange(daysToShow);
@@ -83,12 +91,14 @@ export default function ListEventsCommand() {
     const settled = await Promise.all(
       ordered.map(async (cal) => {
         try {
-          const res = await client.listEvents(
+          const events = (await client.listAllEvents(
             cal.id,
-            { timeMin, timeMax, maxResults: 250, query: q },
-          );
-          return { cal, events: res.items as GoogleEvent[] };
+            { timeMin, timeMax, query: q },
+            signal ? { signal } : undefined,
+          )) as GoogleEvent[];
+          return { cal, events };
         } catch (error) {
+          if (isAbortError(error, signal)) throw error;
           if (error instanceof GoogleApiError && error.status === 401) {
             throw error;
           }
@@ -101,6 +111,9 @@ export default function ListEventsCommand() {
         }
       }),
     );
+
+    if (signal?.aborted) return;
+    if (expectedGeneration !== undefined && generationRef.current !== expectedGeneration) return;
 
     const byCalendar = new Map<string, CalendarListEntry>();
     for (const cal of cals) byCalendar.set(cal.id, cal);
@@ -116,16 +129,22 @@ export default function ListEventsCommand() {
         });
       }
     }
-    const deduped = dedupeEvents(merged, primaryId ?? defaultId);
+    const deduped = dedupeEvents(merged, defaultId, primaryId);
     deduped.sort((a, b) => compareEventsByStart(a.event, b.event));
     setItems(deduped);
     setLoadError(undefined);
   }
 
   async function boot(query: string): Promise<void> {
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setIsLoading(true);
     try {
-      if (!(await isAuthenticated())) {
+      if (!(await ensureSession())) {
+        if (generationRef.current !== generation) return;
         authedRef.current = false;
         setStatus("unauthed");
         setItems([]);
@@ -134,14 +153,17 @@ export default function ListEventsCommand() {
       authedRef.current = true;
       const client = getCalendarClient();
       const list = await fetchCalendarsWithCache(client);
+      if (controller.signal.aborted || generationRef.current !== generation) return;
       const defaultId = await getDefaultCalendarId(list);
       const visible = await getVisibleCalendars(list);
       const primaryId = list.find((c) => c.primary)?.id;
       calendarsRef.current = visible;
       setCalendars(visible);
       setStatus("ready");
-      await loadEvents(visible, query, defaultId, primaryId);
+      await loadEvents(visible, query, defaultId, primaryId, controller.signal, generation);
     } catch (error) {
+      if (isAbortError(error, controller.signal)) return;
+      if (generationRef.current !== generation) return;
       if (error instanceof GoogleApiError && error.status === 401) {
         await showToast({
           style: Toast.Style.Failure,
@@ -161,7 +183,7 @@ export default function ListEventsCommand() {
         setStatus("ready");
       }
     } finally {
-      setIsLoading(false);
+      if (generationRef.current === generation) setIsLoading(false);
     }
   }
 
@@ -172,17 +194,27 @@ export default function ListEventsCommand() {
   }, [reload]);
 
   // Server-side search, debounced ~300ms (List also throttles keystrokes).
+  // Each keystroke bumps the generation and aborts the in-flight fetch so a
+  // slow older response can never overwrite newer results.
   useEffect(() => {
     if (!authedRef.current || calendarsRef.current.length === 0) return;
     const timer = setTimeout(() => {
+      const generation = generationRef.current + 1;
+      generationRef.current = generation;
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
       setIsLoading(true);
       void (async () => {
         try {
           const cals = calendarsRef.current;
           const defaultId = await getDefaultCalendarId(cals);
           const primaryId = cals.find((c) => c.primary)?.id;
-          await loadEvents(cals, searchText, defaultId, primaryId);
+          if (controller.signal.aborted || generationRef.current !== generation) return;
+          await loadEvents(cals, searchText, defaultId, primaryId, controller.signal, generation);
         } catch (error) {
+          if (isAbortError(error, controller.signal)) return;
+          if (generationRef.current !== generation) return;
           if (error instanceof GoogleApiError && error.status === 401) {
             setStatus("unauthed");
           } else {
@@ -193,7 +225,7 @@ export default function ListEventsCommand() {
             });
           }
         } finally {
-          setIsLoading(false);
+          if (generationRef.current === generation) setIsLoading(false);
         }
       })();
     }, 300);
@@ -233,6 +265,7 @@ export default function ListEventsCommand() {
     if (!confirmed) return;
     await signOut();
     invalidateCalendarsCache();
+    abortRef.current?.abort();
     authedRef.current = false;
     setCalendars([]);
     calendarsRef.current = [];

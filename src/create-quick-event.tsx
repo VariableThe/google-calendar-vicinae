@@ -5,14 +5,14 @@ import {
   Detail,
   Form,
   Icon,
-  getPreferenceValues,
   openExtensionPreferences,
   showToast,
   Toast,
   useNavigation,
 } from "@vicinae/api";
-import { GoogleApiError, type CalendarListEntry, type SendUpdates } from "./api/calendar";
-import { isAuthenticated } from "./auth/google-oauth";
+import { GoogleApiError, type CalendarListEntry } from "./api/calendar";
+import { ensureSession } from "./auth/google-oauth";
+import { readSendUpdates } from "./preferences";
 import { getCalendarClient } from "./lib/get-client";
 import {
   fetchCalendarsWithCache,
@@ -23,17 +23,6 @@ import { UnauthenticatedView } from "./components/UnauthenticatedView";
 import { calendarDisplayName } from "./components/EventListItem";
 
 type Status = "checking" | "ready" | "unauthed";
-
-function readSendUpdates(): SendUpdates {
-  try {
-    const raw = getPreferenceValues<Record<string, unknown>>();
-    const value = raw["sendInvitations"];
-    if (value === "all" || value === "externalOnly" || value === "none") return value;
-  } catch {
-    // Preferences unreadable — fall through to the default.
-  }
-  return "all";
-}
 
 function formatPreviewDate(date: Date): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -59,7 +48,7 @@ export default function CreateQuickEventCommand() {
     async function boot() {
       setCalendarsLoading(true);
       try {
-        if (!(await isAuthenticated())) {
+        if (!(await ensureSession())) {
           if (!cancelled) setStatus("unauthed");
           return;
         }

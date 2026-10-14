@@ -7,17 +7,20 @@ type MeetingEvent = Pick<
 
 const URL_RE = /https?:\/\/[^\s<>"')]+/g;
 
-function firstUrl(text: string | undefined): string | undefined {
-  if (typeof text !== "string" || text.length === 0) return undefined;
+function allUrls(text: string | undefined): string[] {
+  if (typeof text !== "string" || text.length === 0) return [];
   const matches = text.match(URL_RE);
-  if (!matches || matches.length === 0) return undefined;
-  // Strip trailing punctuation that is rarely part of the URL.
-  return matches[0].replace(/[.,;!?)\]]+$/, "");
+  if (!matches || matches.length === 0) return [];
+  return matches.map((m) => m.replace(/[.,;!?)\]]+$/, ""));
 }
 
 /**
  * Meeting URL priority: hangoutLink -> conferenceData video entryPoint uri
- * -> first URL in location -> first URL in description.
+ * -> first video-call URL in location -> first video-call URL in description.
+ *
+ * The location/description fallback is deliberately restricted to URLs that
+ * pass `isVideoCallUrl`: a docs/sheets/forms link in the description must
+ * never become a "Join Meeting" action.
  */
 export function getMeetingUrl(
   event: MeetingEvent | undefined,
@@ -37,7 +40,13 @@ export function getMeetingUrl(
     );
     if (anyUri?.uri) return anyUri.uri;
   }
-  return firstUrl(event.location) ?? firstUrl(event.description);
+  for (const url of allUrls(event.location)) {
+    if (isVideoCallUrl(url)) return url;
+  }
+  for (const url of allUrls(event.description)) {
+    if (isVideoCallUrl(url)) return url;
+  }
+  return undefined;
 }
 
 function hostnameOf(url: string): string | undefined {

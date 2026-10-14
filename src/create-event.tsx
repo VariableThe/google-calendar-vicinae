@@ -4,22 +4,21 @@ import {
   ActionPanel,
   Form,
   Icon,
-  getPreferenceValues,
   openExtensionPreferences,
   popToRoot,
   showToast,
   Toast,
 } from "@vicinae/api";
-import { GoogleApiError, type CalendarListEntry, type EventInput, type SendUpdates } from "./api/calendar";
-import { isAuthenticated } from "./auth/google-oauth";
-import { getExtensionPreferences } from "./preferences";
+import { GoogleApiError, type CalendarListEntry, type EventInput } from "./api/calendar";
+import { ensureSession } from "./auth/google-oauth";
+import { getExtensionPreferences, readSendUpdates } from "./preferences";
 import { getCalendarClient } from "./lib/get-client";
 import {
   fetchCalendarsWithCache,
   getDefaultCalendarId,
 } from "./lib/calendar-selection";
 import { addMinutes, resolveEventDurationMinutes, toLocalISOString } from "./lib/date-utils";
-import { GOOGLE_EVENT_COLORS, parseAttendeeEmails } from "./lib/event-values";
+import { GOOGLE_EVENT_COLORS, splitAttendeeEmails } from "./lib/event-values";
 import { UnauthenticatedView } from "./components/UnauthenticatedView";
 import { calendarDisplayName } from "./components/EventListItem";
 
@@ -49,22 +48,9 @@ function nextDay(date: Date): Date {
   return copy;
 }
 
-function readSendUpdates(): SendUpdates {
-  try {
-    const raw = getPreferenceValues<Record<string, unknown>>();
-    const value = raw["sendInvitations"];
-    if (value === "all" || value === "externalOnly" || value === "none") return value;
-  } catch {
-    // Preferences unreadable — fall through to the default.
-  }
-  return "all";
-}
-
 function readAddSignature(): boolean {
   try {
-    const raw = getPreferenceValues<Record<string, unknown>>();
-    if (raw["addSignature"] === undefined) return true;
-    return raw["addSignature"] === true;
+    return getExtensionPreferences().addSignature;
   } catch {
     return true;
   }
@@ -110,7 +96,7 @@ export default function CreateEventCommand() {
     async function boot() {
       setCalendarsLoading(true);
       try {
-        if (!(await isAuthenticated())) {
+        if (!(await ensureSession())) {
           if (!cancelled) setStatus("unauthed");
           return;
         }
@@ -170,7 +156,18 @@ export default function CreateEventCommand() {
     const toast = await showToast({ style: Toast.Style.Animated, title: "Creating event…" });
     try {
       const targetCalendar = calendarId || (await getDefaultCalendarId(calendars));
-      const attendeeEmails = parseAttendeeEmails(attendeesText);
+      const { valid: attendeeEmails, invalid: invalidAttendees } =
+        splitAttendeeEmails(attendeesText);
+      if (invalidAttendees.length > 0) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title:
+            invalidAttendees.length === 1
+              ? "1 invalid attendee ignored"
+              : `${invalidAttendees.length} invalid attendees ignored`,
+          message: invalidAttendees.join(", "),
+        });
+      }
 
       let descriptionText = description.trim().length > 0 ? description : undefined;
       if (descriptionText && readAddSignature()) {
@@ -245,6 +242,8 @@ export default function CreateEventCommand() {
       setSubmitting(false);
     }
   }
+
+  const invalidAttendeePreview = splitAttendeeEmails(attendeesText).invalid;
 
   return (
     <Form
@@ -338,6 +337,12 @@ export default function CreateEventCommand() {
         value={attendeesText}
         onChange={setAttendeesText}
       />
+      {invalidAttendeePreview.length > 0 ? (
+        <Form.Description
+          title="Invalid attendees"
+          text={`Ignored (${invalidAttendeePreview.length}): ${invalidAttendeePreview.join(", ")} — valid addresses are still invited.`}
+        />
+      ) : null}
       <Form.Dropdown id="color" title="Colour" value={colorId} onChange={setColorId}>
         <Form.Dropdown.Item title="Default" value="default" />
         {Object.entries(GOOGLE_EVENT_COLORS).map(([id, color]) => (
