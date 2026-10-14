@@ -50,6 +50,7 @@ export function setFetchImplementationForTesting(fn: FetchImplementation | null)
 interface GoogleClientConfig {
   googleClientId?: string;
   googleClientSecret?: string;
+  refreshToken?: string;
 }
 
 let preferencesOverride: GoogleClientConfig | null = null;
@@ -65,7 +66,11 @@ export function setPreferencesForTesting(prefs: GoogleClientConfig | null): void
 function readClientConfig(): GoogleClientConfig {
   if (preferencesOverride) return preferencesOverride;
   const prefs = getExtensionPreferences();
-  return { googleClientId: prefs.googleClientId, googleClientSecret: prefs.googleClientSecret };
+  return {
+    googleClientId: prefs.googleClientId,
+    googleClientSecret: prefs.googleClientSecret,
+    refreshToken: prefs.refreshToken,
+  };
 }
 
 /**
@@ -166,18 +171,70 @@ export async function isAuthenticated(): Promise<boolean> {
   return tokens !== null && tokens.accessToken.length > 0;
 }
 
-export async function getAccessToken(): Promise<string> {
+/**
+ * Bootstraps a session from the pasted `refreshToken` preference when no
+ * stored tokens exist. Entrypoints call this on boot before checking
+ * isAuthenticated()/getAccessToken().
+ *
+ * Returns true when a usable session exists (stored tokens, or the pasted
+ * refresh token exchanged successfully). Returns false when simply not
+ * authenticated — never throws for that case. Throws MissingClientIdError
+ * only when a refresh token is configured but the Client ID is missing.
+ */
+export async function ensureSession(): Promise<boolean> {
   const tokens = await loadTokens();
-  if (!tokens) throw new NotAuthenticatedError();
-  if (!isExpired(tokens)) return tokens.accessToken;
+  if (tokens !== null && tokens.accessToken.length > 0) return true;
+  const { googleClientId, refreshToken } = readClientConfig();
+  if (!refreshToken) return false;
+  if (!googleClientId) {
+    throw new MissingClientIdError(
+      "Google refresh-token exchange requires the Client ID of your Google Cloud “Desktop app” OAuth client. Open extension preferences and enter it, then try again.",
+    );
+  }
+  try {
+    await authenticateWithRefreshToken(refreshToken);
+    return true;
+  } catch (err) {
+    if (err instanceof MissingClientIdError) throw err;
+    return false;
+  }
+}
+
+/**
+ * Marks the cached access token as expired so the next getAccessToken()
+ * performs a refresh_token exchange. The API client calls this after an
+ * HTTP 401 before retrying the request once. Never throws when there is
+ * simply nothing to invalidate.
+ */
+export async function invalidateAccessToken(): Promise<void> {
+  const tokens = await loadTokens();
+  if (!tokens) return;
   if (!tokens.refreshToken) {
+    await clearTokens();
+    return;
+  }
+  await saveTokens({ ...tokens, expiresAt: 0 });
+}
+
+// Single-flight guard: concurrent getAccessToken() calls share one refresh
+// POST so token rotation cannot invalidate a sibling request's refresh token.
+// Cleared on settle (see below) so a failure rejects all waiters without
+// poisoning later calls.
+let inFlightRefresh: Promise<string> | null = null;
+
+function clearInFlightIfCurrent(task: Promise<string>): void {
+  if (inFlightRefresh === task) inFlightRefresh = null;
+}
+
+async function refreshAccessToken(refreshToken: string | undefined): Promise<string> {
+  if (!refreshToken) {
     await clearTokens();
     throw new NotAuthenticatedError("Google session expired. Please sign in again.");
   }
   const params = withOptionalSecret({
     grant_type: "refresh_token",
     client_id: getGoogleClientId(),
-    refresh_token: tokens.refreshToken,
+    refresh_token: refreshToken,
   });
   let data: TokenEndpointResponse;
   try {
@@ -190,9 +247,23 @@ export async function getAccessToken(): Promise<string> {
     }
     throw err;
   }
-  const next = toStoredTokens(data, tokens.refreshToken);
+  const next = toStoredTokens(data, refreshToken);
   await saveTokens(next);
   return next.accessToken;
+}
+
+export async function getAccessToken(): Promise<string> {
+  const tokens = await loadTokens();
+  if (!tokens) throw new NotAuthenticatedError();
+  if (!isExpired(tokens)) return tokens.accessToken;
+  if (inFlightRefresh) return inFlightRefresh;
+  const task = refreshAccessToken(tokens.refreshToken);
+  inFlightRefresh = task;
+  task.then(
+    () => clearInFlightIfCurrent(task),
+    () => clearInFlightIfCurrent(task),
+  );
+  return task;
 }
 
 export async function startBrowserAuthorization(): Promise<void> {

@@ -6,17 +6,26 @@ import {
   clearTokens,
   isExpired,
   loadTokens,
+  saveTokens,
   setTokenStoreForTesting,
   type StoredTokens,
 } from "../src/auth/tokens";
 import {
   GOOGLE_SCOPES,
+  MissingClientIdError,
   NotAuthenticatedError,
   authenticateWithRefreshToken,
+  ensureSession,
   getAccessToken,
+  invalidateAccessToken,
   setFetchImplementationForTesting,
   setPreferencesForTesting,
 } from "../src/auth/google-oauth";
+import {
+  getExtensionPreferences,
+  readSendUpdates,
+  setRawPreferencesForTesting,
+} from "../src/preferences";
 
 function memoryStore() {
   const map = new Map<string, string>();
@@ -41,6 +50,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 beforeEach(() => {
   setTokenStoreForTesting(memoryStore());
   setPreferencesForTesting({ googleClientId: "test-client-id.apps.googleusercontent.com" });
+  setRawPreferencesForTesting(null);
   setFetchImplementationForTesting(null);
 });
 
@@ -193,6 +203,181 @@ describe("refresh-token exchange", () => {
 
   it("getAccessToken with no tokens throws NotAuthenticatedError", async () => {
     await assert.rejects(() => getAccessToken(), NotAuthenticatedError);
+  });
+});
+
+describe("getAccessToken single-flight", () => {
+  async function seedExpired(refreshToken = "stored-refresh"): Promise<void> {
+    await saveTokens({
+      accessToken: "stale-access",
+      refreshToken,
+      expiresAt: Date.now() - 10_000,
+    });
+  }
+
+  it("two concurrent calls with an expired token perform exactly ONE token POST", async () => {
+    await seedExpired();
+    let posts = 0;
+    setFetchImplementationForTesting(async () => {
+      posts++;
+      // Widen the race window so both callers overlap in-flight.
+      await new Promise((r) => setTimeout(r, 20));
+      return jsonResponse({ access_token: "fresh-access", expires_in: 3600 });
+    });
+
+    const [a, b] = await Promise.all([getAccessToken(), getAccessToken()]);
+    assert.equal(a, "fresh-access");
+    assert.equal(b, "fresh-access");
+    assert.equal(posts, 1);
+    // The rotated-in token preserves the stored refresh token.
+    assert.equal((await loadTokens())?.refreshToken, "stored-refresh");
+  });
+
+  it("a failed refresh rejects both waiters and does not poison later calls", async () => {
+    await seedExpired("revoked-refresh");
+    let posts = 0;
+    setFetchImplementationForTesting(async () => {
+      posts++;
+      await new Promise((r) => setTimeout(r, 10));
+      return jsonResponse(
+        { error: "invalid_grant", error_description: "Token has been expired or revoked." },
+        400,
+      );
+    });
+
+    const [r1, r2] = await Promise.allSettled([getAccessToken(), getAccessToken()]);
+    assert.equal(r1.status, "rejected");
+    assert.equal(r2.status, "rejected");
+    assert.ok((r1 as PromiseRejectedResult).reason instanceof NotAuthenticatedError);
+    assert.ok((r2 as PromiseRejectedResult).reason instanceof NotAuthenticatedError);
+    assert.equal(posts, 1);
+
+    // Later calls work again once valid tokens/refresh input exist.
+    await seedExpired("good-refresh");
+    setFetchImplementationForTesting(async () =>
+      jsonResponse({ access_token: "recovered-access", expires_in: 3600 }),
+    );
+    assert.equal(await getAccessToken(), "recovered-access");
+  });
+});
+
+describe("invalidateAccessToken", () => {
+  it("forces the next getAccessToken past the skew/expiry fast path", async () => {
+    // Fresh token: no network call without invalidation.
+    await saveTokens({
+      accessToken: "cached-access",
+      refreshToken: "stored-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    });
+    let posts = 0;
+    setFetchImplementationForTesting(async () => {
+      posts++;
+      return jsonResponse({ access_token: "post-401-access", expires_in: 3600 });
+    });
+    assert.equal(await getAccessToken(), "cached-access");
+    assert.equal(posts, 0);
+
+    await invalidateAccessToken();
+    assert.equal(await getAccessToken(), "post-401-access");
+    assert.equal(posts, 1);
+  });
+
+  it("resolves quietly when no tokens are stored", async () => {
+    await invalidateAccessToken();
+  });
+});
+
+describe("ensureSession", () => {
+  it("returns true without network when stored tokens exist", async () => {
+    await saveTokens({
+      accessToken: "cached-access",
+      refreshToken: "stored-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    });
+    let posts = 0;
+    setFetchImplementationForTesting(async () => {
+      posts++;
+      return jsonResponse({ access_token: "x", expires_in: 3600 });
+    });
+    assert.equal(await ensureSession(), true);
+    assert.equal(posts, 0);
+  });
+
+  it("exchanges the pasted refreshToken preference when no tokens are stored", async () => {
+    setPreferencesForTesting({
+      googleClientId: "test-client-id.apps.googleusercontent.com",
+      refreshToken: "pasted-refresh-token",
+    });
+    let posts = 0;
+    setFetchImplementationForTesting(async (url, init) => {
+      posts++;
+      const body = new URLSearchParams(String((init?.body as string) ?? ""));
+      assert.equal(body.get("refresh_token"), "pasted-refresh-token");
+      return jsonResponse({ access_token: "boot-access", expires_in: 3600 });
+    });
+    assert.equal(await ensureSession(), true);
+    assert.equal(posts, 1);
+    assert.equal((await loadTokens())?.accessToken, "boot-access");
+  });
+
+  it("throws MissingClientIdError mentioning the Client ID when refreshToken is set without one", async () => {
+    setPreferencesForTesting({ refreshToken: "pasted-refresh-token" });
+    await assert.rejects(() => ensureSession(), (err: unknown) => {
+      assert.ok(err instanceof MissingClientIdError);
+      assert.match((err as Error).message, /Client ID/);
+      return true;
+    });
+  });
+
+  it("returns false (never throws) when simply not authenticated", async () => {
+    setPreferencesForTesting({ googleClientId: "test-client-id.apps.googleusercontent.com" });
+    assert.equal(await ensureSession(), false);
+  });
+
+  it("returns false when the pasted refresh token is rejected", async () => {
+    setPreferencesForTesting({
+      googleClientId: "test-client-id.apps.googleusercontent.com",
+      refreshToken: "bad-refresh-token",
+    });
+    setFetchImplementationForTesting(async () =>
+      jsonResponse({ error: "invalid_grant", error_description: "Bad." }, 400),
+    );
+    assert.equal(await ensureSession(), false);
+  });
+});
+
+describe("extension preferences", () => {
+  it("defaults sendInvitations to all and addSignature to true", () => {
+    setPreferencesForTesting(null);
+    setRawPreferencesForTesting({});
+    assert.equal(readSendUpdates(), "all");
+    const prefs = getExtensionPreferences();
+    assert.equal(prefs.sendInvitations, "all");
+    assert.equal(prefs.addSignature, true);
+    assert.equal(prefs.defaultEventDuration, "30");
+  });
+
+  it("falls back to all on an invalid stored sendInvitations value", () => {
+    setPreferencesForTesting(null);
+    setRawPreferencesForTesting({ sendInvitations: "everyone" });
+    assert.equal(readSendUpdates(), "all");
+    assert.equal(getExtensionPreferences().sendInvitations, "all");
+  });
+
+  it("passes through valid values and normalizes empty strings", () => {
+    setPreferencesForTesting(null);
+    setRawPreferencesForTesting({
+      sendInvitations: "none",
+      addSignature: false,
+      refreshToken: "",
+      googleClientId: "cid",
+    });
+    assert.equal(readSendUpdates(), "none");
+    const prefs = getExtensionPreferences();
+    assert.equal(prefs.sendInvitations, "none");
+    assert.equal(prefs.addSignature, false);
+    assert.equal(prefs.refreshToken, undefined);
+    assert.equal(prefs.googleClientId, "cid");
   });
 });
 
