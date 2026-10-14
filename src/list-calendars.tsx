@@ -23,6 +23,7 @@ import {
 } from "./lib/calendar-selection";
 import { UnauthenticatedView } from "./components/UnauthenticatedView";
 import { calendarDisplayName } from "./components/EventListItem";
+import { formatGoogleApiError } from "./lib/api-errors";
 import ListEventsCommand from "./list-events";
 
 type Status = "checking" | "ready" | "unauthed";
@@ -77,7 +78,7 @@ export default function ListCalendarsCommand() {
             await showToast({
               style: Toast.Style.Failure,
               title: "Could not load calendars",
-              message: error instanceof Error ? error.message : String(error),
+              message: formatGoogleApiError(error),
             });
             setStatus("ready");
           }

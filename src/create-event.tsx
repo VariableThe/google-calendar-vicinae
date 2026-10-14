@@ -21,6 +21,7 @@ import { addMinutes, resolveEventDurationMinutes, toLocalISOString } from "./lib
 import { GOOGLE_EVENT_COLORS, splitAttendeeEmails } from "./lib/event-values";
 import { UnauthenticatedView } from "./components/UnauthenticatedView";
 import { calendarDisplayName } from "./components/EventListItem";
+import { formatGoogleApiError } from "./lib/api-errors";
 
 type Status = "checking" | "ready" | "unauthed";
 
@@ -115,7 +116,7 @@ export default function CreateEventCommand() {
             await showToast({
               style: Toast.Style.Failure,
               title: "Could not load calendars",
-              message: error instanceof Error ? error.message : String(error),
+              message: formatGoogleApiError(error),
             });
             setStatus("ready");
           }
@@ -245,7 +246,7 @@ export default function CreateEventCommand() {
       } else {
         toast.style = Toast.Style.Failure;
         toast.title = "Could not create event";
-        toast.message = error instanceof Error ? error.message : String(error);
+        toast.message = formatGoogleApiError(error);
         await toast.update();
       }
     } finally {
