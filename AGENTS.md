@@ -36,9 +36,12 @@ Four commands are implemented and covered by unit tests (`npm test`):
   `openid`, `email`, `profile`. No Contacts/People.
 - Testing-mode consent screens require the user as a listed test user;
   testing-mode refresh tokens expire after ~7 days.
-- Never use Vicinae's built-in `OAuth.PKCEClient` for Google: its only
-  redirect URIs are raycast.com / `raycast://` / `com.raycast:/`, which
-  Google does not accept for this flow.
+- Never use Vicinae's built-in `OAuth.PKCEClient.authorize` for Google:
+  its only redirect URIs are raycast.com / `raycast://` / `com.raycast:/`,
+  which Google does not accept for this flow. Token *storage*, however,
+  DOES go through a stable module-level `OAuth.PKCEClient` via
+  `setTokens`/`getTokens`/`removeTokens` (`src/auth/tokens.ts`) — only
+  the authorization redirect is custom.
 
 ## Scope notes
 

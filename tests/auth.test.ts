@@ -9,6 +9,7 @@ import {
   saveTokens,
   setTokenStoreForTesting,
   type StoredTokens,
+  type TokenStoreAdapter,
 } from "../src/auth/tokens";
 import {
   GOOGLE_SCOPES,
@@ -27,15 +28,50 @@ import {
   setRawPreferencesForTesting,
 } from "../src/preferences";
 
-function memoryStore() {
-  const map = new Map<string, string>();
+/**
+ * In-memory stand-in for the `OAuth.PKCEClient` token methods: implements
+ * the same `setTokens` / `getTokens` / `removeTokens` shape with the same
+ * `updatedAt`-anchored, `expiresIn`-relative semantics, so the
+ * save/load/clear/refresh paths exercise the production mapping without a
+ * Vicinae host.
+ */
+function memoryStore(): TokenStoreAdapter {
+  let set:
+    | {
+        accessToken: string;
+        refreshToken?: string;
+        expiresIn?: number;
+        scope?: string;
+        updatedAt: Date;
+      }
+    | undefined;
   return {
-    getItem: async (key: string) => map.get(key),
-    setItem: async (key: string, value: string) => {
-      map.set(key, value);
+    setTokens: async (tokens) => {
+      set = { ...tokens, updatedAt: new Date() };
     },
-    removeItem: async (key: string) => {
-      map.delete(key);
+    getTokens: async () => {
+      if (!set) return undefined;
+      const snapshot = set;
+      const expiresIn =
+        typeof snapshot.expiresIn === "number" && Number.isFinite(snapshot.expiresIn)
+          ? snapshot.expiresIn
+          : 3600;
+      const updatedAt = snapshot.updatedAt;
+      return {
+        accessToken: snapshot.accessToken,
+        ...(snapshot.refreshToken !== undefined
+          ? { refreshToken: snapshot.refreshToken }
+          : {}),
+        expiresIn,
+        ...(snapshot.scope !== undefined ? { scope: snapshot.scope } : {}),
+        updatedAt,
+        // Mirrors the API's own `isExpired()`: relative lifetime anchored
+        // at the store time, with a small buffer before actual expiry.
+        isExpired: () => Date.now() >= updatedAt.getTime() + expiresIn * 1000 - 5_000,
+      };
+    },
+    removeTokens: async () => {
+      set = undefined;
     },
   };
 }
@@ -113,11 +149,50 @@ describe("isExpired", () => {
   });
 });
 
+describe("PKCEClient-backed token store", () => {
+  it("round-trips tokens and re-anchors expiry to the store time", async () => {
+    const before = Date.now();
+    await saveTokens({
+      accessToken: "access-1",
+      refreshToken: "refresh-1",
+      expiresAt: before + 3600_000,
+      scope: "email profile",
+    });
+    const stored = await loadTokens();
+    assert.ok(stored);
+    assert.equal(stored.accessToken, "access-1");
+    assert.equal(stored.refreshToken, "refresh-1");
+    assert.equal(stored.scope, "email profile");
+    // expiresIn is second-granular: allow rounding + elapsed tolerance.
+    assert.ok(Math.abs(stored.expiresAt - (before + 3600_000)) < 5_000);
+    assert.equal(isExpired(stored), false);
+  });
+
+  it("loads an already-expired save as expired", async () => {
+    await saveTokens({
+      accessToken: "stale",
+      refreshToken: "refresh-1",
+      expiresAt: Date.now() - 10_000,
+    });
+    const stored = await loadTokens();
+    assert.ok(stored);
+    assert.equal(isExpired(stored), true);
+  });
+
+  it("returns null when the store is empty and after clear", async () => {
+    assert.equal(await loadTokens(), null);
+    await saveTokens({ accessToken: "x", expiresAt: Date.now() + 3600_000 });
+    assert.ok(await loadTokens());
+    await clearTokens();
+    assert.equal(await loadTokens(), null);
+  });
+});
+
 describe("buildAuthorizationUrl", () => {
   it("contains all required parameters with correctly encoded scopes", () => {
     const url = buildAuthorizationUrl({
       clientId: "cid.apps.googleusercontent.com",
-      redirectUri: "http://127.0.0.1:8765/callback",
+      redirectUri: "http://127.0.0.1:54321/callback",
       codeChallenge: "challenge123",
       state: "state-abc",
       scopes: GOOGLE_SCOPES,
@@ -125,7 +200,7 @@ describe("buildAuthorizationUrl", () => {
     const parsed = new URL(url);
     assert.equal(parsed.origin + parsed.pathname, "https://accounts.google.com/o/oauth2/v2/auth");
     assert.equal(parsed.searchParams.get("client_id"), "cid.apps.googleusercontent.com");
-    assert.equal(parsed.searchParams.get("redirect_uri"), "http://127.0.0.1:8765/callback");
+    assert.equal(parsed.searchParams.get("redirect_uri"), "http://127.0.0.1:54321/callback");
     assert.equal(parsed.searchParams.get("response_type"), "code");
     assert.equal(parsed.searchParams.get("code_challenge"), "challenge123");
     assert.equal(parsed.searchParams.get("code_challenge_method"), "S256");
