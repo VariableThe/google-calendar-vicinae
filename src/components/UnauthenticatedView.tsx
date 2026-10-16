@@ -30,6 +30,7 @@ This extension uses **your own Google Cloud OAuth "Desktop app" client**, so you
 2. Paste the **Client ID** (and Client Secret, if your client type has one) into this extension's preferences.
 3. Choose **Sign in with Google** below and approve the consent screen in your browser.
 4. Alternatively, paste a **Refresh Token** into the extension preferences (\`refreshToken\`) to skip the browser flow entirely, then choose **Use Refresh Token from Preferences** below.
+5. **Publish your app.** In the OAuth consent screen / Google Auth Platform audience settings, choose **Publish app** instead of leaving the project in Testing. While it stays in Testing, Google expires your refresh token 7 days after consent and you must re-authorize every week. Publishing needs no verification for your own client — the only effect is an "unverified app" warning during consent.
 `;
 
 /** Refresh tokens live in extension preferences — never entered inline. */

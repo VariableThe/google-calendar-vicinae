@@ -1,5 +1,5 @@
 {
-  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "$schema": "https://raw.githubusercontent.com/vicinaehq/vicinae/refs/heads/main/extra/schemas/extension.json",
   "name": "google-calendar",
   "title": "Google Calendar",
   "description": "Browse calendars, list events, and create events in Google Calendar.",

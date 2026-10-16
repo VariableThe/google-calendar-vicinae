@@ -13,6 +13,12 @@ Status: four commands implemented (`list-events`, `list-calendars`,
 `create-event`, `create-quick-event`), typechecked (`npm run typecheck`),
 unit-tested (`npm test`), built cleanly (`npm run build`).
 
+Tested on Linux. The manifest does not declare `platforms`, so the extension
+is offered on all platforms Vicinae supports; the loopback OAuth listener
+uses Node's standard library and the helper script's browser-opening path
+handles Linux, macOS and Windows, so no platform is knowingly excluded — but
+only Linux has actually been exercised.
+
 ## Features
 
 - **List Events** (`list-events`) — upcoming events across visible
@@ -62,19 +68,38 @@ shared client secret shipped with the extension.
    [Google Cloud console](https://console.cloud.google.com/).
 2. Enable the **Google Calendar API** for that project
    (APIs & Services > Library).
-3. Configure the **OAuth consent screen** (APIs & Services > OAuth consent
-   screen): choose External, fill in the app name, and add yourself as a
-   **test user**. Apps with publishing status "Testing" only work for
-   listed test users, and their refresh tokens expire after ~7 days —
-   re-sign-in is then required.
-4. Create an OAuth client (APIs & Services > Credentials > Create
+3. Configure the **OAuth consent screen**: choose **External**, fill in the
+   app name, and add yourself as a **test user**. In the current console
+   this lives under **Google Auth Platform → Audience**; in the older UI it
+   is **APIs & Services → OAuth consent screen**. Apps left in publishing
+   status "Testing" only work for listed test users, and their refresh
+   tokens expire after ~7 days — re-sign-in is then required.
+4. **Publish the app — this is the step that matters most.** Go to
+   **Google Auth Platform → Audience → Publish app** (older console UI:
+   **APIs & Services → OAuth consent screen → Publish app**). Google states
+   it directly: *"Authorizations by a test user will expire seven days from
+   the time of consent. If your OAuth client requests an `offline` access
+   type and receives a refresh token, that token will also expire."* and
+   *"A project's publishing status is considered **In production** after
+   selecting the **Publish app** button."*
+   ([Manage App Audience](https://support.google.com/cloud/answer/15549945)).
+   Publishing moves your own project out of "Testing", which removes that
+   7-day refresh-token expiry. The only cost is the unverified-app warning
+   during consent: Google *"will display an Unverified apps warning message
+   if your project's OAuth clients request authorization of scopes
+   considered sensitive or restricted before your project has completed
+   verification for those scopes."* Verification is not required to stop the
+   expiry — publish and ignore the warning for your own client. The
+   basic-identity-scope exception (`openid`, `email`, `profile`) does not
+   apply here, because the extension also requests Calendar scopes.
+5. Create an OAuth client (APIs & Services > Credentials > Create
    Credentials > OAuth client ID) of type **"Desktop app"**. A Desktop-app
    client needs **no redirect-URI registration**: Google allows the
    loopback redirect on `http://127.0.0.1` with an ephemeral port, which is
    what the extension uses (`http://127.0.0.1:<port>/callback`).
-5. Copy the **Client ID** (and secret, if one is issued) into the extension
+6. Copy the **Client ID** (and secret, if one is issued) into the extension
    preferences (`googleClientId`, `googleClientSecret`).
-6. The extension requests only `calendar.events`,
+7. The extension requests only `calendar.events`,
    `calendar.readonly`, `openid`, `email`, `profile`. No Contacts/People
    scopes are requested.
 
@@ -123,8 +148,10 @@ usable with Google's Desktop-app client type.
 - **`invalid_grant` from a pasted refresh token.** The token was minted
   for a different Client ID. Mint it for the same Client ID stored in the
   extension preferences with `node scripts/get-refresh-token.mjs --help`
-  — not via the OAuth Playground or `gcloud`. Testing-mode tokens also
-  expire after ~7 days; re-sign-in is then required.
+  — not via the OAuth Playground or `gcloud`. A testing-mode refresh token
+  also stops working about 7 days after consent; the fix is to publish the
+  app (**Google Auth Platform → Audience → Publish app**) rather than
+  re-signing in every week. See setup step 4.
 - **Nothing shows up in Vicinae's OAuth store.** Expected: tokens are
   kept in the extension's own Vicinae `LocalStorage` entry, not in
   Vicinae's OAuth credential store (`OAuth.PKCEClient` is intentionally
